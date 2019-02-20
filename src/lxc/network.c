@@ -1777,6 +1777,72 @@ int lxc_ipv4_dest_add(int ifindex, struct in_addr *dest)
 	return ip_route_dest_add(AF_INET, ifindex, dest);
 }
 
+int lxc_ipv4_route_dest_add(int ifindex, struct in_addr *dest, struct in_addr *gateway)
+{
+  // https://github.com/kenshin54/crane
+  // https://github.com/kenshin54/crane/blob/master/src/crn_network.c
+  // https://linux.die.net/man/3/inet_aton
+  // https://lartc.vger.kernel.narkive.com/ZGn8kcNY/problem-in-route-add-using-netlink
+  // http://qos.ittc.ku.edu/netlink/html/node16.html
+  int family = AF_INET;
+	int addrlen, err;
+	struct nl_handler nlh;
+	struct rtmsg *rt;
+	struct nlmsg *answer = NULL, *nlmsg = NULL;
+
+	addrlen = family == AF_INET ? sizeof(struct in_addr)
+				    : sizeof(struct in6_addr);
+
+	err = netlink_open(&nlh, NETLINK_ROUTE);
+	if (err)
+		return err;
+
+	err = -ENOMEM;
+	nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
+	if (!nlmsg)
+		goto out;
+
+	answer = nlmsg_alloc_reserve(NLMSG_GOOD_SIZE);
+	if (!answer)
+		goto out;
+
+	nlmsg->nlmsghdr->nlmsg_flags =
+	    NLM_F_ACK | NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
+	nlmsg->nlmsghdr->nlmsg_type = RTM_NEWROUTE;
+
+	rt = nlmsg_reserve(nlmsg, sizeof(struct rtmsg));
+	if (!rt)
+		goto out;
+	rt->rtm_family = family;
+	rt->rtm_table = RT_TABLE_MAIN;
+	rt->rtm_scope = RT_SCOPE_LINK;
+	rt->rtm_protocol = RTPROT_BOOT;
+	rt->rtm_type = RTN_UNICAST;
+	rt->rtm_dst_len = addrlen * 8;
+	//https://android.googlesource.com/kernel/tests/+/master/net/test/iproute.py
+	// https://www.linuxjournal.com/article/8498
+	// https://www.linuxjournal.com/article/8498
+	// https://stackoverflow.com/questions/37465768/installing-a-new-route-in-linux-routing-table-using-rtnetlink-socket
+	// https://www.linuxquestions.org/questions/linux-networking-3/adding-routes-using-netlink-sockets-184664/
+	// addattr_l(&req.n, sizeof(req), RTA_DST, destination, 4);
+	// addattr_l(&req.n, sizeof(req), RTA_GATEWAY, gateway, 4);
+	err = -EINVAL;
+	if (nla_put_buffer(nlmsg, RTA_DST, dest, addrlen))
+		goto out;
+	if (nla_put_buffer(nlmsg, RTA_GATEWAY, gateway, addrlen))
+	        goto out;
+	if (nla_put_u32(nlmsg, RTA_OIF, ifindex))
+		goto out;
+	err = netlink_transaction(&nlh, nlmsg, answer);
+out:
+	netlink_close(&nlh);
+	nlmsg_free(answer);
+	nlmsg_free(nlmsg);
+	return err;
+  // int family, int ifindex, void *dest
+  // return ip_route_dest_add(AF_INET, ifindex, dest);
+}
+
 int lxc_ipv6_dest_add(int ifindex, struct in6_addr *dest)
 {
 	return ip_route_dest_add(AF_INET6, ifindex, dest);
@@ -2924,6 +2990,53 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 				}
 				return -1;
 			}
+		}
+	}
+
+	if (netdev->ipv4route) {
+	  	if (!(netdev->flags & IFF_UP)) {
+			ERROR("Cannot add ipv4 gateway for network device "
+			      "\"%s\" when not bringing up the interface", ifname);
+			return -1;
+		}
+		if (lxc_list_empty(&netdev->ipv4)) {
+			ERROR("Cannot add ipv4 gateway for network device "
+			      "\"%s\" when not assigning an address", ifname);
+			return -1;
+		}
+		// https://git.busybox.net/busybox/plain/networking/libiproute/iproute.c
+		// netdev->ipv4route
+		// https://www.linuxjournal.com/article/8498
+		// https://www.linuxjournal.com/article/7356
+		// https://gist.github.com/cl4u2/5204374
+		/* int ret; */
+		/* struct in_addr *gw; */
+		/* gw = malloc(sizeof(*gw)); */
+		/* if (!gw) */
+		/* 	return -1; */
+		/* char * value = '192.168.1.1' */
+		/* ret = inet_pton(AF_INET, value, gw); */
+		/* if (!ret || ret < 0) { */
+		/* 	SYSERROR("Invalid ipv4 gateway address \"%s\"", value); */
+		/* 	free(gw); */
+		/* 	return -1; */
+		/* } */
+		// inet_pton(AF_INET, dsts, ((char *)rtap) + sizeof(struct rtattr));
+
+		struct in_addr *gw;
+		gw = malloc(sizeof(*gw));
+		char * value = "192.168.1.1";
+		inet_pton(AF_INET, value, gw);
+
+		struct in_addr *dest;
+		dest = malloc(sizeof(*dest));
+		char * value1 = "192.168.2.0";
+		inet_pton(AF_INET, value1, dest);
+
+		err = lxc_ipv4_route_dest_add(netdev->ifindex, dest, gw);
+		if (err) {
+		  ERROR("Fried to set autodetected ipv4 gateway");
+		  return -1;
 		}
 	}
 

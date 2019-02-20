@@ -154,6 +154,7 @@ union netdev_p {
  *                      configuration
  * @downscript        : a script filename to be executed during interface
  *                      destruction
+ * @ipv4route         : custom route
  */
 struct lxc_netdev {
 	ssize_t idx;
@@ -171,7 +172,8 @@ struct lxc_netdev {
 	struct in_addr *ipv4_gateway;
 	bool ipv6_gateway_auto;
 	struct in6_addr *ipv6_gateway;
-	char *upscript;
+        char *ipv4route;
+        char *upscript;
 	char *downscript;
 };
 

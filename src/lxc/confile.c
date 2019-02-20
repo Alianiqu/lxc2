@@ -105,6 +105,7 @@ lxc_config_define(net_flags);
 lxc_config_define(net_hwaddr);
 lxc_config_define(net_ipv4_address);
 lxc_config_define(net_ipv4_gateway);
+lxc_config_define(net_ipv4_route);
 lxc_config_define(net_ipv6_address);
 lxc_config_define(net_ipv6_gateway);
 lxc_config_define(net_link);
@@ -198,6 +199,7 @@ static struct lxc_config_t config[] = {
 	{ "lxc.net.hwaddr",                false,                  set_config_net_hwaddr,                  get_config_net_hwaddr,                  clr_config_net_hwaddr,                },
 	{ "lxc.net.ipv4.address",          false,                  set_config_net_ipv4_address,            get_config_net_ipv4_address,            clr_config_net_ipv4_address,          },
 	{ "lxc.net.ipv4.gateway",          false,                  set_config_net_ipv4_gateway,            get_config_net_ipv4_gateway,            clr_config_net_ipv4_gateway,          },
+	{ "lxc.net.ipv4.route",            false,                  set_config_net_ipv4_route,              get_config_net_ipv4_route,              clr_config_net_ipv4_route,            },
 	{ "lxc.net.ipv6.address",          false,                  set_config_net_ipv6_address,            get_config_net_ipv6_address,            clr_config_net_ipv6_address,          },
 	{ "lxc.net.ipv6.gateway",          false,                  set_config_net_ipv6_gateway,            get_config_net_ipv6_gateway,            clr_config_net_ipv6_gateway,          },
 	{ "lxc.net.link",                  false,                  set_config_net_link,                    get_config_net_link,                    clr_config_net_link,                  },
@@ -757,6 +759,22 @@ static int set_config_net_ipv4_gateway(const char *key, const char *value,
 
 	return 0;
 }
+
+static int set_config_net_ipv4_route(const char *key, const char *value,
+				     struct lxc_conf *lxc_conf, void *data)
+{
+  struct lxc_netdev *netdev;
+  if (lxc_config_value_empty(value))
+    return clr_config_net_ipv4_route(key, lxc_conf, data);
+  if (!data)
+    return -1;
+  else
+    netdev = data;
+  if (!netdev)
+    return -1;
+  return set_config_string_item(&netdev->ipv4route, value);
+}
+
 
 static int set_config_net_ipv6_address(const char *key, const char *value,
 				       struct lxc_conf *lxc_conf, void *data)
@@ -3905,6 +3923,24 @@ static int clr_config_net_ipv4_gateway(const char *key,
 	return 0;
 }
 
+static int clr_config_net_ipv4_route(const char *key, struct lxc_conf *lxc_conf,
+				     void *data)
+{
+  struct lxc_netdev *netdev;
+
+  if (!data)
+    return -1;
+  else
+    netdev = data;
+  if (!netdev)
+    return -1;
+
+  free(netdev->ipv4route);
+  netdev->ipv4route = NULL;
+
+  return 0;
+}
+
 static int clr_config_net_ipv4_address(const char *key,
 				       struct lxc_conf *lxc_conf, void *data)
 {
@@ -4314,6 +4350,30 @@ static int get_config_net_ipv4_gateway(const char *key, char *retv, int inlen,
 	}
 
 	return fulllen;
+}
+
+static int get_config_net_ipv4_route(const char *key, char *retv, int inlen,
+				     struct lxc_conf *c, void *data)
+{
+  int len, fulllen = 0;
+  struct lxc_netdev *netdev;
+
+  if (!retv)
+    inlen = 0;
+  else
+    memset(retv, 0, inlen);
+
+  if (!data)
+    return -1;
+  else
+    netdev = data;
+  if (!netdev)
+    return -1;
+
+  if (netdev->ipv4route)
+    strprint(retv, inlen, "%s", netdev->ipv4route);
+
+  return fulllen;
 }
 
 static int get_config_net_ipv4_address(const char *key, char *retv, int inlen,

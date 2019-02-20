@@ -312,6 +312,8 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 				TRACE("upscript: %s", netdev->upscript);
 			if (netdev->downscript)
 				TRACE("downscript: %s", netdev->downscript);
+			if (netdev->ipv4route)
+				TRACE("ipv4route: %s", netdev->ipv4route);
 
 			TRACE("ipv4 gateway auto: %s",
 			      netdev->ipv4_gateway_auto ? "true" : "false");
