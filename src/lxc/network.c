@@ -1894,14 +1894,12 @@ struct ovs_veth_args {
 /* Called from a background thread - when nic goes away, remove it from the
  * bridge.
  */
-static int lxc_ovs_delete_port_exec(void *data)
-{
-	struct ovs_veth_args *args = data;
-
-	execlp("ovs-vsctl", "ovs-vsctl", "del-port", args->bridge, args->nic,
-	       (char *)NULL);
-	return -1;
-}
+/* static int lxc_ovs_delete_port_exec(void *data) { */
+/* 	struct ovs_veth_args *args = data; */
+/* 	execlp("ovs-vsctl", "ovs-vsctl", "del-port", args->bridge, args->nic, */
+/* 	       (char *)NULL); */
+/* 	return -1; */
+/* } */
 
 int lxc_ovs_delete_port(const char *bridge, const char *nic)
 {
@@ -1911,10 +1909,23 @@ int lxc_ovs_delete_port(const char *bridge, const char *nic)
 
 	args.bridge = bridge;
 	args.nic = nic;
+	/* ret = run_command(cmd_output, sizeof(cmd_output), */
+	/* 		  lxc_ovs_delete_port_exec, (void *)&args); */
+
 	ret = run_command(cmd_output, sizeof(cmd_output),
-			  lxc_ovs_delete_port_exec, (void *)&args);
+			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
+
 	if (ret < 0) {
-		ERROR("Failed to delete \"%s\" from openvswitch bridge \"%s\": "
+		ERROR("Failed to delete \"%s\" from openvswitch first phase bridge \"%s\": "
+		      "%s", bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
+
+	if (ret < 0) {
+		ERROR("Failed to delete \"%s\" from openvswitch second phase bridge \"%s\": "
 		      "%s", bridge, nic, cmd_output);
 		return -1;
 	}
@@ -1922,11 +1933,23 @@ int lxc_ovs_delete_port(const char *bridge, const char *nic)
 	return 0;
 }
 
-static int lxc_ovs_attach_bridge_exec(void *data)
-{
+static int lxc_ovs_attach_bridge_exec_first(void *data) {
 	struct ovs_veth_args *args = data;
+	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-bridge", args->bridge,
+	       (char *)NULL);
+	return -1;
+}
 
-	execlp("ovs-vsctl", "ovs-vsctl", "add-port", args->bridge, args->nic,
+static int lxc_ovs_attach_bridge_exec_second(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ovs-vsctl", "ovs-vsctl", "--if-exists", "del-port", args->bridge, args->nic,
+	       (char *)NULL);
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_third(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-port", args->bridge, args->nic,
 	       (char *)NULL);
 	return -1;
 }
@@ -1940,9 +1963,25 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 	args.bridge = bridge;
 	args.nic = nic;
 	ret = run_command(cmd_output, sizeof(cmd_output),
-			  lxc_ovs_attach_bridge_exec, (void *)&args);
+			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
 	if (ret < 0) {
-		ERROR("Failed to attach \"%s\" to openvswitch bridge \"%s\": %s",
+		ERROR("Failed to attach \"%s\" to openvswitch first phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch second phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_third, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch third phase bridge \"%s\": %s",
 		      bridge, nic, cmd_output);
 		return -1;
 	}
