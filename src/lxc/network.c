@@ -1777,41 +1777,9 @@ int lxc_ipv4_dest_add(int ifindex, struct in_addr *dest)
 	return ip_route_dest_add(AF_INET, ifindex, dest);
 }
 
-int lxc_ipv4_route_dest_add(int ifindex, struct in_addr *dest, struct in_addr *gateway)
+int lxc_ipv4_route_dest_add(int ifindex, struct in_addr *dest,
+			    struct in_addr *gateway, const int mask)
 {
-  // https://git.busybox.net/busybox/plain/networking/libiproute/iproute.c
-  // netdev->ipv4route
-  // https://www.linuxjournal.com/article/8498
-  // https://www.linuxjournal.com/article/7356
-  // https://gist.github.com/cl4u2/5204374
-  /* int ret; */
-  /* struct in_addr *gw; */
-  /* gw = malloc(sizeof(*gw)); */
-  /* if (!gw) */
-  /* 	return -1; */
-  /* char * value = '192.168.1.1' */
-  /* ret = inet_pton(AF_INET, value, gw); */
-  /* if (!ret || ret < 0) { */
-  /* 	SYSERROR("Invalid ipv4 gateway address \"%s\"", value); */
-  /* 	free(gw); */
-  /* 	return -1; */
-  /* } */
-  // inet_pton(AF_INET, dsts, ((char *)rtap) + sizeof(struct rtattr));
-  // https://github.com/kenshin54/crane
-  // https://github.com/kenshin54/crane/blob/master/src/crn_network.c
-  // https://linux.die.net/man/3/inet_aton
-  // https://lartc.vger.kernel.narkive.com/ZGn8kcNY/problem-in-route-add-using-netlink
-  // http://qos.ittc.ku.edu/netlink/html/node16.html
-  //https://android.googlesource.com/kernel/tests/+/master/net/test/iproute.py
-  // https://www.linuxjournal.com/article/8498
-  // https://www.linuxjournal.com/article/8498
-  // https://stackoverflow.com/questions/37465768/installing-a-new-route-in-linux-routing-table-using-rtnetlink-socket
-  // https://www.linuxquestions.org/questions/linux-networking-3/adding-routes-using-netlink-sockets-184664/
-  // addattr_l(&req.n, sizeof(req), RTA_DST, destination, 4);
-  // addattr_l(&req.n, sizeof(req), RTA_GATEWAY, gateway, 4);
-  // int family, int ifindex, void *dest
-  // return ip_route_dest_add(AF_INET, ifindex, dest);
-
   int family = AF_INET;
   int addrlen, err;
   struct nl_handler nlh;
@@ -1847,7 +1815,7 @@ int lxc_ipv4_route_dest_add(int ifindex, struct in_addr *dest, struct in_addr *g
   rt->rtm_scope =  RT_SCOPE_UNIVERSE; // RT_SCOPE_LINK;
   rt->rtm_protocol = RTPROT_BOOT;
   rt->rtm_type = RTN_UNICAST;
-  rt->rtm_dst_len = 24;
+  rt->rtm_dst_len = mask;
   err = -EINVAL;
   if (nla_put_buffer(nlmsg, RTA_DST, dest, addrlen))
     goto out;
@@ -1901,41 +1869,9 @@ struct ovs_veth_args {
 /* 	return -1; */
 /* } */
 
-int lxc_ovs_delete_port(const char *bridge, const char *nic)
-{
-	int ret;
-	char cmd_output[MAXPATHLEN];
-	struct ovs_veth_args args;
-
-	args.bridge = bridge;
-	args.nic = nic;
-	/* ret = run_command(cmd_output, sizeof(cmd_output), */
-	/* 		  lxc_ovs_delete_port_exec, (void *)&args); */
-
-	ret = run_command(cmd_output, sizeof(cmd_output),
-			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
-
-	if (ret < 0) {
-		ERROR("Failed to delete \"%s\" from openvswitch first phase bridge \"%s\": "
-		      "%s", bridge, nic, cmd_output);
-		return -1;
-	}
-
-	ret = run_command(cmd_output, sizeof(cmd_output),
-			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
-
-	if (ret < 0) {
-		ERROR("Failed to delete \"%s\" from openvswitch second phase bridge \"%s\": "
-		      "%s", bridge, nic, cmd_output);
-		return -1;
-	}
-
-	return 0;
-}
-
 static int lxc_ovs_attach_bridge_exec_first(void *data) {
 	struct ovs_veth_args *args = data;
-	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-bridge", args->bridge,
+	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-br", args->bridge,
 	       (char *)NULL);
 	return -1;
 }
@@ -1952,6 +1888,37 @@ static int lxc_ovs_attach_bridge_exec_third(void *data) {
 	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-port", args->bridge, args->nic,
 	       (char *)NULL);
 	return -1;
+}
+
+int lxc_ovs_delete_port(const char *bridge, const char *nic)
+{
+	int ret;
+	char cmd_output[MAXPATHLEN];
+	struct ovs_veth_args args;
+
+	args.bridge = bridge;
+	args.nic = nic;
+
+	/* ret = run_command(cmd_output, sizeof(cmd_output), */
+	/* 		  lxc_ovs_delete_port_exec, (void *)&args); */
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to delete \"%s\" from openvswitch first phase bridge \"%s\": "
+		      "%s", bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to delete \"%s\" from openvswitch second phase bridge \"%s\": "
+		      "%s", bridge, nic, cmd_output);
+		return -1;
+	}
+
+	return 0;
 }
 
 static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
@@ -2001,8 +1968,11 @@ int lxc_bridge_attach(const char *bridge, const char *ifname)
 	if (!index)
 		return -EINVAL;
 
-	if (is_ovs_bridge(bridge))
-		return lxc_ovs_attach_bridge(bridge, ifname);
+	if (true)
+	        return lxc_ovs_attach_bridge(bridge, ifname);
+
+	/* if (is_ovs_bridge(bridge)) */
+	/* 	return lxc_ovs_attach_bridge(bridge, ifname); */
 
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
@@ -2879,6 +2849,119 @@ static int setup_ipv6_addr(struct lxc_list *ip, int ifindex)
 	return 0;
 }
 
+
+const static int _parse_route (char * route, const int ifindex, const char * ifname) {
+
+  /* char * route = malloc(strlen(_route) + 1); */
+  /* memset(route, 0, strlen(_route) + 1); */
+  /* strcpy(route, _route); */
+
+  const char delim1[] = " ";
+  const char delim2[] = "/";
+  const char cdelim2  = '/';
+  char * snet = NULL;
+  char * sdst = NULL;
+  char * smask = NULL;
+  char * sgw = NULL;
+  int mask = 0;
+
+  char * part = strtok(route, delim1);
+  if (part != NULL) {
+    snet = part;
+    part = strtok(NULL, delim1);
+    if (part != NULL) {
+      sgw = part;
+    }
+  }
+
+  if (snet != NULL && sgw != NULL) {
+    if (strchr(snet, cdelim2) != NULL) {
+      char * p = strtok(snet, delim2);
+      if (p != NULL) {
+	sdst = p;
+	p = strtok(NULL, delim2);
+	if (p != NULL) {
+	  smask = p;
+	}
+      }
+    }
+
+    if (sdst != NULL &&  smask != NULL) {
+      mask = atoi(smask);
+
+      struct in_addr *dest;
+      struct in_addr *gw;
+
+      int err;
+
+      dest = malloc(sizeof(*dest));
+      memset(dest, 0, sizeof(*dest));
+      inet_pton(AF_INET, sdst, dest);
+
+      gw = malloc(sizeof(*gw));
+      memset(gw, 0, sizeof(*gw));
+      inet_pton(AF_INET, sgw, gw);
+
+      err = lxc_ipv4_route_dest_add(ifindex, dest, gw, mask);
+      if (err) {
+	ERROR("1-st ip r add are failed with "
+	      "device \"%s\": %s. Second adding route to gateway", ifname, strerror(-err));
+
+	err = lxc_ipv4_dest_add(ifindex, gw);
+	if (err) {
+	  ERROR("Failed to add ipv4 dest for network "
+		"device \"%s\": %s", ifname, strerror(-err));
+	}
+
+	err = lxc_ipv4_route_dest_add(ifindex, dest, gw, mask);
+	if (err) {
+	  ERROR("2-nd ip r add are failed "
+		"device \"%s\": %s", ifname, strerror(-err));
+	  // free(route);
+	  free(dest);
+	  free(gw);
+	  return -1;
+	}
+      }
+      // free(route);
+      free(dest);
+      free(gw);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+const static int _parse_routes(const char * _routes, const int ifindex, const char *ifname) {
+  char * routes = malloc(strlen(_routes) +1);
+  memset(routes, 0, strlen(_routes) + 1);
+  strcpy(routes, _routes);
+  int err;
+
+  char delim[] = "|";
+  char * route = strtok(routes, delim);
+  char * arrs[10];
+  int i = 0;
+  while (route != NULL) {
+    // printf("'%s'\n", route);
+    arrs[i] = malloc(strlen(route) + 1);
+    memset(arrs[i], 0, strlen(route) + 1);
+    strcpy(arrs[i], route);
+    route = strtok(NULL, delim);
+    i++;
+  }
+  for (int j=0; j < i; j++) {
+    err = _parse_route(arrs[j], ifindex, ifname);
+    free(arrs[j]);
+    if (err) {
+      free(routes);
+      return err;
+    }
+  }
+  free(routes);
+  return 0;
+}
+
 static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 {
 	char ifname[IFNAMSIZ];
@@ -3103,34 +3186,12 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 			return -1;
 		}
 
-		struct in_addr *gw;
-		gw = malloc(sizeof(*gw));
-		char * value = "192.168.1.1";
-		inet_pton(AF_INET, value, gw);
-
-		struct in_addr *dest;
-		dest = malloc(sizeof(*dest));
-		char * value1 = "192.168.2.0";
-		inet_pton(AF_INET, value1, dest);
-
-		
-		err = lxc_ipv4_route_dest_add(netdev->ifindex, dest, gw);
-		if (err) {		  
-		  ERROR("1-st ip r add are failed with "
+		printf("\n route is %s", netdev->ipv4route);
+		err = _parse_routes(netdev->ipv4route, netdev->ifindex, ifname);
+		if (err) {
+		  ERROR("_parse_routes ip r add are failed with "
 			"device \"%s\": %s. Second adding route to gateway", ifname, strerror(-err));
-
-		  err = lxc_ipv4_dest_add(netdev->ifindex, gw);
-		  if (err) {
-		    ERROR("Failed to add ipv4 dest for network "
-			  "device \"%s\": %s", ifname, strerror(-err));
-		  }
-		  
-		  err = lxc_ipv4_route_dest_add(netdev->ifindex, dest, gw);
-		  if (err) {
-		    ERROR("2-nd ip r add are failed "
-			  "device \"%s\": %s", ifname, strerror(-err));
-		    return -1;
-		  }
+		  return -1;
 		}
 	}
 
