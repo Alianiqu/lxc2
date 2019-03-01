@@ -203,6 +203,7 @@ static int instantiate_veth(struct lxc_handler *handler, struct lxc_netdev *netd
 		goto out_delete;
 	}
 
+
 	if (netdev->upscript) {
 		err = run_script(handler->name, "net", netdev->upscript, "up",
 				 "veth", veth1, (char*) NULL);
@@ -321,12 +322,33 @@ static int instantiate_vlan(struct lxc_handler *handler, struct lxc_netdev *netd
 	return 0;
 }
 
+static int lxc_ovs_attach_bridge(const char *bridge, const char *nic);
+  
 static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netdev)
 {
+
 	if (netdev->link[0] == '\0') {
 		ERROR("No link for physical interface specified");
 		return -1;
 	}
+
+	if (netdev->priv.veth_attr.pair[0] == '\0') {
+	  ERROR("No veth pair for physical interface specified");
+	  return -1;
+	}
+
+	// int l = strnlen(netdev->priv.veth_attr.pair, IFNAMSIZ);
+	memset(netdev->priv.veth_attr.veth1, 0, IFNAMSIZ);
+	strncpy(netdev->priv.veth_attr.veth1, netdev->priv.veth_attr.pair, IFNAMSIZ);
+	
+	// brname = netdev->priv.veth_attr.pair;
+	// ifname = netdev->link;
+
+	/* store away for deconf */
+
+	lxc_ovs_attach_bridge(netdev->priv.veth_attr.pair, netdev->link);
+
+	// netdev->link = netdev->priv.veth_attr.pair;
 
 	/* Note that we're retrieving the container's ifindex in the host's
 	 * network namespace because we need it to move the device from the
@@ -337,7 +359,7 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 	 */
 	netdev->ifindex = if_nametoindex(netdev->link);
 	if (!netdev->ifindex) {
-		ERROR("Failed to retrieve ifindex for \"%s\"", netdev->link);
+        	ERROR("Failed to retrieve ifindex for \"%s\" \"%d\"", netdev->link, netdev->ifindex);
 		return -1;
 	}
 
@@ -353,6 +375,11 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 		if (err)
 			return -1;
 	}
+
+	// int l = strnlen(ifname, IFNAMSIZ);
+	// memset(netdev->link, 0, IFNAMSIZ);
+	// strncpy(netdev->link, netdev->priv.veth_attr.pair, IFNAMSIZ);
+	// memcpy(netdev->link, netdev->priv.veth_attr.pair, IFNAMSIZ);
 
 	return 0;
 }
@@ -425,8 +452,7 @@ static int shutdown_vlan(struct lxc_handler *handler, struct lxc_netdev *netdev)
 
 static int shutdown_phys(struct lxc_handler *handler, struct lxc_netdev *netdev)
 {
-	int err;
-
+        int err;
 	if (netdev->downscript) {
 		err = run_script(handler->name, "net", netdev->downscript,
 				 "down", "phys", netdev->link, (char*) NULL);
@@ -1885,8 +1911,8 @@ static int lxc_ovs_attach_bridge_exec_second(void *data) {
 
 static int lxc_ovs_attach_bridge_exec_third(void *data) {
 	struct ovs_veth_args *args = data;
-	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-port", args->bridge, args->nic,
-	       (char *)NULL);
+	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-port", args->bridge, args->nic, "--",
+	       "set", "interface", args->nic, "type=internal", (char *)NULL);
 	return -1;
 }
 
@@ -2419,6 +2445,7 @@ bool lxc_delete_network_unpriv(struct lxc_handler *handler)
 			continue;
 
 		if (netdev->type == LXC_NET_PHYS) {
+						  
 			ret = lxc_netdev_rename_by_index(netdev->ifindex,
 							 netdev->link);
 			if (ret < 0)
@@ -2594,16 +2621,34 @@ bool lxc_delete_network_priv(struct lxc_handler *handler)
 			continue;
 
 		if (netdev->type == LXC_NET_PHYS) {
-			ret = lxc_netdev_rename_by_index(netdev->ifindex, netdev->link);
-			if (ret < 0)
-				WARN("Failed to rename interface with index %d "
-				     "from \"%s\" to its initial name \"%s\"",
-				     netdev->ifindex, netdev->name, netdev->link);
-			else
-				TRACE("Renamed interface with index %d from "
-				      "\"%s\" to its initial name \"%s\"",
-				      netdev->ifindex, netdev->name,
-				      netdev->link);
+				  
+		  int err;
+
+		  // brname = netdev->priv.veth_attr.pair;
+
+		  /* if (netdev->priv.veth_attr.pair[0] != '\0') { */
+		  /*   brname = netdev->priv.veth_attr.pair; */
+		  /* } else { */
+		  /*   brname = netdev->priv.veth_attr.veth1; */
+		  /* } */
+		  
+		  err = lxc_ovs_delete_port(netdev->priv.veth_attr.veth1, netdev->link);
+		  if (err) {
+		    ERROR("FAILED \"%s\" and \"%s\"", netdev->priv.veth_attr.veth1, netdev->link);
+
+		    return -1;
+		  }
+
+		        /* ret = lxc_netdev_rename_by_index(netdev->ifindex, netdev->link); */
+			/* if (ret < 0) */
+			/* 	WARN("Failed to rename interface with index %d " */
+			/* 	     "from \"%s\" to its initial name \"%s\"", */
+			/* 	     netdev->ifindex, netdev->name, netdev->link); */
+			/* else */
+			/* 	TRACE("Renamed interface with index %d from " */
+			/* 	      "\"%s\" to its initial name \"%s\"", */
+			/* 	      netdev->ifindex, netdev->name, */
+			/* 	      netdev->link); */
 			goto clear_ifindices;
 		}
 
@@ -2999,10 +3044,10 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 
 	/* get the new ifindex in case of physical netdev */
 	if (netdev->type == LXC_NET_PHYS) {
-		netdev->ifindex = if_nametoindex(netdev->link);
+	        netdev->ifindex = if_nametoindex(netdev->link); // netdev->priv.veth_attr.pair
 		if (!netdev->ifindex) {
 			ERROR("Failed to get ifindex for network device \"%s\"",
-			      netdev->link);
+			      netdev->link); // netdev->priv.veth_attr.pair
 			return -1;
 		}
 	}
@@ -3020,7 +3065,7 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 	 */
 	if (netdev->name[0] == '\0') {
 		if (netdev->type == LXC_NET_PHYS)
-			strcpy(netdev->name, netdev->link);
+		        strcpy(netdev->name, netdev->link); // netdev->link netdev->priv.veth_attr.pair
 		else
 			strcpy(netdev->name, "eth%d");
 	}
