@@ -326,7 +326,7 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic);
   
 static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netdev)
 {
-
+  int err;
 	if (netdev->link[0] == '\0') {
 		ERROR("No link for physical interface specified");
 		return -1;
@@ -346,7 +346,12 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 
 	/* store away for deconf */
 
-	lxc_ovs_attach_bridge(netdev->priv.veth_attr.pair, netdev->link);
+	err = lxc_ovs_attach_bridge(netdev->priv.veth_attr.pair, netdev->link);
+	if (err) {
+	  ERROR("Failed to attach \"%s\" to bridge \"%s\"",
+		netdev->priv.veth_attr.pair, netdev->link);
+	}
+
 
 	// netdev->link = netdev->priv.veth_attr.pair;
 
@@ -1902,6 +1907,15 @@ static int lxc_ovs_attach_bridge_exec_first(void *data) {
 	return -1;
 }
 
+
+static int lxc_ovs_attach_bridge_exec_first_up(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ip", "ip", "link", "set", "up", "dev", args->bridge,
+	       (char *)NULL);
+	return -1;
+}
+
+
 static int lxc_ovs_attach_bridge_exec_second(void *data) {
 	struct ovs_veth_args *args = data;
 	execlp("ovs-vsctl", "ovs-vsctl", "--if-exists", "del-port", args->bridge, args->nic,
@@ -1915,6 +1929,13 @@ static int lxc_ovs_attach_bridge_exec_third(void *data) {
 	       "set", "interface", args->nic, "type=internal", (char *)NULL);
 	return -1;
 }
+
+static int lxc_ovs_attach_bridge_exec_third_up(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ip", "ip", "link", "set", "up", "dev", args->nic, (char *)NULL);
+	return -1;
+}
+
 
 int lxc_ovs_delete_port(const char *bridge, const char *nic)
 {
@@ -1964,6 +1985,15 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 	}
 
 	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first_up, (void *)&args);
+
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch first phase up bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
 			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
 	if (ret < 0) {
 		ERROR("Failed to attach \"%s\" to openvswitch second phase bridge \"%s\": %s",
@@ -1975,6 +2005,14 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 			  lxc_ovs_attach_bridge_exec_third, (void *)&args);
 	if (ret < 0) {
 		ERROR("Failed to attach \"%s\" to openvswitch third phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_third_up, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch third phase up bridge \"%s\": %s",
 		      bridge, nic, cmd_output);
 		return -1;
 	}
