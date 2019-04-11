@@ -187,6 +187,17 @@ static int instantiate_veth(struct lxc_handler *handler, struct lxc_netdev *netd
 		}
 	}
 
+	/*if (netdev->vrf) {
+		INFO("Retrieved vrf %s", netdev->vrf);
+		err = lxc_netdev_set_vrf(veth1, netdev->vrf);
+		if (err) {
+			ERROR("Failed to set vrf \"%s\" for veth pair \"%s\" "
+						"and \"%s\" : %s", 
+						netdev->vrf, veth1, veth2, strerror(-err));
+			goto out_delete;
+		}
+	}*/
+
 	if (netdev->link[0] != '\0') {
 		err = lxc_bridge_attach(netdev->link, veth1);
 		if (err) {
@@ -1076,6 +1087,145 @@ out:
 	nlmsg_free(nlmsg);
 	nlmsg_free(answer);
 	return err;
+}
+
+static int lxc_netdev_create_vrf(const char *vrf, const char *table_id)
+{
+	DEBUG("Creating vrf \"%s\"", vrf); 
+	int err;
+	struct ifinfomsg *ifi;
+	struct nl_handler nlh;
+	struct rtattr *nest1, *nest2;
+	struct nlmsg *answer = NULL, *nlmsg = NULL;
+
+	uint32_t table;
+	sscanf(table_id, "%u", &table);
+
+	err = netlink_open(&nlh, NETLINK_ROUTE);
+	if (err)
+		return err;
+
+	err = -ENOMEM;
+	nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
+	if (!nlmsg)
+		goto out;
+
+	answer = nlmsg_alloc_reserve(NLMSG_GOOD_SIZE);
+	if (!answer)
+		goto out;
+
+	nlmsg->nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK;
+	nlmsg->nlmsghdr->nlmsg_type = RTM_NEWLINK;
+
+	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
+	if (!ifi) {
+		err = -ENOMEM;
+		goto out;
+	}
+	ifi->ifi_family = AF_UNSPEC;
+	ifi->ifi_change |= IFF_UP;
+	ifi->ifi_flags |= IFF_UP;
+
+	nest1 = nla_begin_nested(nlmsg, IFLA_LINKINFO);
+	if (!nest1)
+		goto out;
+
+	if (nla_put_string(nlmsg, IFLA_INFO_KIND, "vrf"))
+		goto out;
+
+	nest2 = nla_begin_nested(nlmsg, IFLA_INFO_DATA);
+	if (!nest2)
+		goto out;
+	
+	if (nla_put_u32(nlmsg,IFLA_VRF_TABLE, table))
+		goto out;
+
+	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
+	if (!ifi) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	nla_end_nested(nlmsg, nest2);
+	nla_end_nested(nlmsg, nest1);
+
+	if (nla_put_string(nlmsg, IFLA_IFNAME, vrf))
+		goto out;
+
+	err = netlink_transaction(&nlh, nlmsg, answer);
+out:
+	netlink_close(&nlh);
+	nlmsg_free(answer);
+	nlmsg_free(nlmsg);
+	return err;
+}
+
+int lxc_netdev_set_vrf(const char *name, const char *vrf, const char *table_id)
+{
+	lxc_netdev_create_vrf(vrf, table_id);
+	DEBUG("Setting vrf \"%s\" for interface \"%s\"", vrf, name); 
+	int err, index, vrfindex, len;
+	struct ifinfomsg *ifi;
+	struct nl_handler nlh;
+	struct nlmsg *answer = NULL, *nlmsg = NULL;
+
+	err = netlink_open(&nlh, NETLINK_ROUTE);
+	if (err)
+		return err;
+
+	err = -EINVAL;
+	len = strlen(name);
+	if (len == 1 || len >= IFNAMSIZ)
+		goto out;
+
+	err = -ENOMEM;
+	nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
+	if (!nlmsg)
+		goto out;
+
+	answer = nlmsg_alloc_reserve(NLMSG_GOOD_SIZE);
+	if (!answer)
+		goto out;
+
+	err = -EINVAL;
+	index = if_nametoindex(name);
+	if (!index)
+		goto out;
+	DEBUG("Interface \"%s\" ifindex:%d", name, index); 
+
+	err = -EINVAL;
+	vrfindex = if_nametoindex(vrf);
+	if (!vrfindex)
+		goto out;
+	DEBUG("VRF \"%s\" ifindex:%d", vrf, vrfindex); 
+
+	nlmsg->nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	nlmsg->nlmsghdr->nlmsg_type = RTM_NEWLINK;
+
+	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
+	if (!ifi) {
+		err = -ENOMEM;
+		goto out;
+	}
+	ifi->ifi_family = AF_UNSPEC;
+	ifi->ifi_index = index;
+
+	if (nla_put_u32(nlmsg, IFLA_MASTER, vrfindex))
+		goto out;
+
+	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
+	if (!ifi) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	err = netlink_transaction(&nlh, nlmsg, answer);
+out:
+	netlink_close(&nlh);
+	nlmsg_free(answer);
+	nlmsg_free(nlmsg);
+	return err;
+
 }
 
 int lxc_netdev_up(const char *name)
@@ -3114,6 +3264,16 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 		if (err) {
 			ERROR("Failed to rename network device \"%s\" to "
 			      "\"%s\": %s", ifname, netdev->name, strerror(-err));
+			return -1;
+		}
+	}
+
+	/* set vrf for interface */
+	if (netdev->vrf && netdev->table_id) {
+		err = lxc_netdev_set_vrf(ifname, netdev->vrf, netdev->table_id);
+		if (err) {
+			ERROR("Failed to set vrf \"%s\" tablie id %s to "
+			      "\"%s\": %s", netdev->vrf, netdev->table_id, ifname, strerror(-err));
 			return -1;
 		}
 	}

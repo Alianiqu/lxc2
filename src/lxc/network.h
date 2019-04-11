@@ -165,6 +165,8 @@ struct lxc_netdev {
 	char name[IFNAMSIZ];
 	char *hwaddr;
 	char *mtu;
+	char *vrf;
+	char *table_id;
 	union netdev_p priv;
 	struct lxc_list ipv4;
 	struct lxc_list ipv6;
@@ -202,6 +204,8 @@ extern int lxc_netdev_down(const char *name);
 
 /* Change the mtu size for the specified device. */
 extern int lxc_netdev_set_mtu(const char *name, int mtu);
+
+extern int lxc_netdev_set_vrf(const char *name, const char *vrf, const char *table_id);
 
 /* Create a virtual network devices. */
 extern int lxc_veth_create(const char *name1, const char *name2);
