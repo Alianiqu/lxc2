@@ -308,6 +308,10 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 				TRACE("hwaddr: %s", netdev->hwaddr);
 			if (netdev->mtu)
 				TRACE("mtu: %s", netdev->mtu);
+			if (netdev->vrf)
+				TRACE("vrf: %s", netdev->vrf);
+			if (netdev->table_id)
+				TRACE("vrf table id: %s", netdev->table_id);
 			if (netdev->upscript)
 				TRACE("upscript: %s", netdev->upscript);
 			if (netdev->downscript)
@@ -356,6 +360,8 @@ static void lxc_free_netdev(struct lxc_netdev *netdev)
 	free(netdev->downscript);
 	free(netdev->hwaddr);
 	free(netdev->mtu);
+	free(netdev->vrf);
+	free(netdev->table_id);
 
 	free(netdev->ipv4_gateway);
 	lxc_list_for_each_safe(cur, &netdev->ipv4, next) {
