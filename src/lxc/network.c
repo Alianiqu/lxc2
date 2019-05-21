@@ -2057,6 +2057,21 @@ static int lxc_ovs_attach_bridge_exec_first(void *data) {
 	return -1;
 }
 
+static int lxc_ovs_attach_bridge_exec_first_half(void *data) {
+	struct ovs_veth_args *args = data;
+	// ovs-vsctl set Bridge brlan rstp_enable=false
+	execlp("ovs-vsctl", "ovs-vsctl", "set", "Bridge", args->bridge, "rstp_enable=false",
+	       (char *)NULL);
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_first_half_half(void *data) {
+	struct ovs_veth_args *args = data;
+	// ovs-vsctl set Bridge brlan stp_enable=false
+	execlp("ovs-vsctl", "ovs-vsctl", "set", "Bridge", args->bridge, "stp_enable=false",
+	       (char *)NULL);
+	return -1;
+}
 
 static int lxc_ovs_attach_bridge_exec_first_up(void *data) {
 	struct ovs_veth_args *args = data;
@@ -2130,6 +2145,22 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
 	if (ret < 0) {
 		ERROR("Failed to attach \"%s\" to openvswitch first phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first_half, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch first_half phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first_half_half, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch first_half phase bridge \"%s\": %s",
 		      bridge, nic, cmd_output);
 		return -1;
 	}
