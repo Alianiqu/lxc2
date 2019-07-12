@@ -94,6 +94,7 @@ struct ifla_veth {
 	char pair[IFNAMSIZ];
 	char veth1[IFNAMSIZ];
 	int ifindex;
+	uint16_t vlan;
 };
 
 struct ifla_vlan {
@@ -240,7 +241,7 @@ extern int lxc_ipv4_gateway_add(int ifindex, struct in_addr *gw);
 extern int lxc_ipv6_gateway_add(int ifindex, struct in6_addr *gw);
 
 /* Attach an interface to the bridge. */
-extern int lxc_bridge_attach(const char *bridge, const char *ifname);
+extern int lxc_bridge_attach(const char *bridge, const char *ifname, const uint16_t vlan);
 extern int lxc_ovs_delete_port(const char *bridge, const char *nic);
 
 extern bool is_ovs_bridge(const char *bridge);

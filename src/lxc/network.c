@@ -199,7 +199,7 @@ static int instantiate_veth(struct lxc_handler *handler, struct lxc_netdev *netd
 	}*/
 
 	if (netdev->link[0] != '\0') {
-		err = lxc_bridge_attach(netdev->link, veth1);
+		err = lxc_bridge_attach(netdev->link, veth1, netdev->priv.veth_attr.vlan);
 		if (err) {
 			ERROR("Failed to attach \"%s\" to bridge \"%s\": %s",
 			      veth1, netdev->link, strerror(-err));
@@ -333,7 +333,7 @@ static int instantiate_vlan(struct lxc_handler *handler, struct lxc_netdev *netd
 	return 0;
 }
 
-static int lxc_ovs_attach_bridge(const char *bridge, const char *nic);
+static int lxc_ovs_attach_bridge(const char *bridge, const char *nic, const uint16_t vlan );
   
 static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netdev)
 {
@@ -348,6 +348,10 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 	  return -1;
 	}
 
+	if( netdev->priv.veth_attr.vlan > 4095 ) {
+		netdev->priv.veth_attr.vlan = 0;
+	}
+
 	// int l = strnlen(netdev->priv.veth_attr.pair, IFNAMSIZ);
 	memset(netdev->priv.veth_attr.veth1, 0, IFNAMSIZ);
 	strncpy(netdev->priv.veth_attr.veth1, netdev->priv.veth_attr.pair, IFNAMSIZ);
@@ -357,7 +361,7 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 
 	/* store away for deconf */
 
-	err = lxc_ovs_attach_bridge(netdev->priv.veth_attr.pair, netdev->link);
+	err = lxc_ovs_attach_bridge(netdev->priv.veth_attr.pair, netdev->link, netdev->priv.veth_attr.vlan);
 	if (err) {
 	  ERROR("Failed to attach \"%s\" to bridge \"%s\"",
 		netdev->priv.veth_attr.pair, netdev->link);
@@ -1140,12 +1144,6 @@ static int lxc_netdev_create_vrf(const char *vrf, const char *table_id)
 	if (nla_put_u32(nlmsg,IFLA_VRF_TABLE, table))
 		goto out;
 
-	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
-	if (!ifi) {
-		err = -ENOMEM;
-		goto out;
-	}
-
 	nla_end_nested(nlmsg, nest2);
 	nla_end_nested(nlmsg, nest1);
 
@@ -1212,12 +1210,6 @@ int lxc_netdev_set_vrf(const char *name, const char *vrf, const char *table_id)
 
 	if (nla_put_u32(nlmsg, IFLA_MASTER, vrfindex))
 		goto out;
-
-	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
-	if (!ifi) {
-		err = -ENOMEM;
-		goto out;
-	}
 
 	err = netlink_transaction(&nlh, nlmsg, answer);
 out:
@@ -2038,6 +2030,7 @@ bool is_ovs_bridge(const char *bridge)
 struct ovs_veth_args {
 	const char *bridge;
 	const char *nic;
+	uint16_t vlan;
 };
 
 /* Called from a background thread - when nic goes away, remove it from the
@@ -2080,6 +2073,16 @@ static int lxc_ovs_attach_bridge_exec_third(void *data) {
 	return -1;
 }
 
+static int lxc_ovs_attach_bridge_exec_third_set_native_mode(void *data) {
+	struct ovs_veth_args *args = data;
+	char tag[10];
+	memset( tag, 0, sizeof( tag ) );
+	snprintf( tag, sizeof(tag), "tag=%d", args->vlan );
+	execlp("ovs-vsctl", "ovs-vsctl", "--if-exists", "set", "port", args->nic,
+		   "vlan_mode=access", tag, (char *)NULL );
+	return -1;
+}
+
 static int lxc_ovs_attach_bridge_exec_third_up(void *data) {
 	struct ovs_veth_args *args = data;
 	execlp("ip", "ip", "link", "set", "up", "dev", args->nic, (char *)NULL);
@@ -2118,7 +2121,7 @@ int lxc_ovs_delete_port(const char *bridge, const char *nic)
 	return 0;
 }
 
-static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
+static int lxc_ovs_attach_bridge(const char *bridge, const char *nic, const uint16_t vlan )
 {
 	int ret;
 	char cmd_output[MAXPATHLEN];
@@ -2126,6 +2129,7 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 
 	args.bridge = bridge;
 	args.nic = nic;
+	args.vlan = vlan;
 	ret = run_command(cmd_output, sizeof(cmd_output),
 			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
 	if (ret < 0) {
@@ -2159,6 +2163,17 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 		return -1;
 	}
 
+	if( vlan != 0)
+	{
+		ret = run_command(cmd_output, sizeof(cmd_output),
+				lxc_ovs_attach_bridge_exec_third_set_native_mode, (void *)&args);
+		if (ret < 0) {
+			ERROR("Failed to attach \"%s\" to openvswitch third phase set native vlan bridge \"%s\": %s",
+				bridge, nic, cmd_output);
+			return -1;
+		}
+	}
+
 	ret = run_command(cmd_output, sizeof(cmd_output),
 			  lxc_ovs_attach_bridge_exec_third_up, (void *)&args);
 	if (ret < 0) {
@@ -2170,7 +2185,7 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 	return 0;
 }
 
-int lxc_bridge_attach(const char *bridge, const char *ifname)
+int lxc_bridge_attach(const char *bridge, const char *ifname, const uint16_t vlan)
 {
 	int err, fd, index;
 	struct ifreq ifr;
@@ -2183,7 +2198,7 @@ int lxc_bridge_attach(const char *bridge, const char *ifname)
 		return -EINVAL;
 
 	if (true)
-	        return lxc_ovs_attach_bridge(bridge, ifname);
+	        return lxc_ovs_attach_bridge(bridge, ifname, vlan);
 
 	/* if (is_ovs_bridge(bridge)) */
 	/* 	return lxc_ovs_attach_bridge(bridge, ifname); */

@@ -119,6 +119,7 @@ lxc_config_define(net_script_down);
 lxc_config_define(net_script_up);
 lxc_config_define(net_type);
 lxc_config_define(net_veth_pair);
+lxc_config_define(net_veth_vlan);
 lxc_config_define(net_vlan_id);
 lxc_config_define(no_new_privs);
 lxc_config_define(noop);
@@ -215,6 +216,7 @@ static struct lxc_config_t config[] = {
 	{ "lxc.net.type",                  false,                  set_config_net_type,                    get_config_net_type,                    clr_config_net_type,                  },
 	{ "lxc.net.vlan.id",               false,                  set_config_net_vlan_id,                 get_config_net_vlan_id,                 clr_config_net_vlan_id,               },
 	{ "lxc.net.veth.pair",             false,                  set_config_net_veth_pair,               get_config_net_veth_pair,               clr_config_net_veth_pair,             },
+	{ "lxc.net.veth.vlan",             false,                  set_config_net_veth_vlan,               get_config_net_veth_vlan,               clr_config_net_veth_vlan,             },
 	{ "lxc.net.",                      false,                  set_config_net_nic,                     get_config_net_nic,                     clr_config_net_nic,                   },
 	{ "lxc.net",                       false,                  set_config_net,                         get_config_net,                         clr_config_net,                       },
 	{ "lxc.no_new_privs",	             false,                  set_config_no_new_privs,                get_config_no_new_privs,                clr_config_no_new_privs,              },
@@ -530,7 +532,33 @@ static int set_config_net_veth_pair(const char *key, const char *value,
 	if (!netdev)
 		return -1;
 
+	netdev->priv.veth_attr.vlan = 0;
+
 	return network_ifname(netdev->priv.veth_attr.pair, value);
+}
+
+static int set_config_net_veth_vlan(const char *key, const char *value,
+				    struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_veth_vlan(key, lxc_conf, data);
+
+	if (!data)
+		return -1;
+	else
+		netdev = data;
+	if (!netdev)
+		return -1;
+	
+	uint16_t v = atoi( value );
+	if( v < 0 || v > 4095 )
+		v = 0;
+
+	netdev->priv.veth_attr.vlan = v;
+
+	return 0;
 }
 
 static int set_config_net_macvlan_mode(const char *key, const char *value,
@@ -3855,6 +3883,23 @@ static int clr_config_net_veth_pair(const char *key, struct lxc_conf *lxc_conf,
 	return 0;
 }
 
+static int clr_config_net_veth_vlan(const char *key, struct lxc_conf *lxc_conf,
+				    void *data)
+{
+	struct lxc_netdev *netdev;
+
+	if (!data)
+		return -1;
+	else
+		netdev = data;
+	if (!netdev)
+		return -1;
+
+	netdev->priv.veth_attr.vlan = 0;
+
+	return 0;
+}
+
 static int clr_config_net_script_up(const char *key, struct lxc_conf *lxc_conf,
 				    void *data)
 {
@@ -4272,6 +4317,32 @@ static int get_config_net_veth_pair(const char *key, char *retv, int inlen,
 		 netdev->priv.veth_attr.pair[0] != '\0'
 		     ? netdev->priv.veth_attr.pair
 		     : netdev->priv.veth_attr.veth1);
+
+	return fulllen;
+}
+
+static int get_config_net_veth_vlan(const char *key, char *retv, int inlen,
+				    struct lxc_conf *c, void *data)
+{
+	int len, fulllen = 0;
+	struct lxc_netdev *netdev;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!data)
+		return -1;
+	else
+		netdev = data;
+	if (!netdev)
+		return -1;
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	strprint(retv, inlen, "%d", netdev->priv.veth_attr.vlan );
 
 	return fulllen;
 }
