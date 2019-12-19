@@ -187,8 +187,19 @@ static int instantiate_veth(struct lxc_handler *handler, struct lxc_netdev *netd
 		}
 	}
 
+	/*if (netdev->vrf) {
+		INFO("Retrieved vrf %s", netdev->vrf);
+		err = lxc_netdev_set_vrf(veth1, netdev->vrf);
+		if (err) {
+			ERROR("Failed to set vrf \"%s\" for veth pair \"%s\" "
+						"and \"%s\" : %s", 
+						netdev->vrf, veth1, veth2, strerror(-err));
+			goto out_delete;
+		}
+	}*/
+
 	if (netdev->link[0] != '\0') {
-		err = lxc_bridge_attach(netdev->link, veth1);
+		err = lxc_bridge_attach(netdev->link, veth1, netdev->priv.veth_attr.vlan);
 		if (err) {
 			ERROR("Failed to attach \"%s\" to bridge \"%s\": %s",
 			      veth1, netdev->link, strerror(-err));
@@ -202,6 +213,7 @@ static int instantiate_veth(struct lxc_handler *handler, struct lxc_netdev *netd
 		ERROR("Failed to set \"%s\" up: %s", veth1, strerror(-err));
 		goto out_delete;
 	}
+
 
 	if (netdev->upscript) {
 		err = run_script(handler->name, "net", netdev->upscript, "up",
@@ -321,12 +333,42 @@ static int instantiate_vlan(struct lxc_handler *handler, struct lxc_netdev *netd
 	return 0;
 }
 
+static int lxc_ovs_attach_bridge(const char *bridge, const char *nic, const uint16_t vlan );
+  
 static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netdev)
 {
+  int err;
 	if (netdev->link[0] == '\0') {
 		ERROR("No link for physical interface specified");
 		return -1;
 	}
+
+	if (netdev->priv.veth_attr.pair[0] == '\0') {
+	  ERROR("No veth pair for physical interface specified");
+	  return -1;
+	}
+
+	if( netdev->priv.veth_attr.vlan > 4095 ) {
+		netdev->priv.veth_attr.vlan = 0;
+	}
+
+	// int l = strnlen(netdev->priv.veth_attr.pair, IFNAMSIZ);
+	memset(netdev->priv.veth_attr.veth1, 0, IFNAMSIZ);
+	strncpy(netdev->priv.veth_attr.veth1, netdev->priv.veth_attr.pair, IFNAMSIZ);
+	
+	// brname = netdev->priv.veth_attr.pair;
+	// ifname = netdev->link;
+
+	/* store away for deconf */
+
+	err = lxc_ovs_attach_bridge(netdev->priv.veth_attr.pair, netdev->link, netdev->priv.veth_attr.vlan);
+	if (err) {
+	  ERROR("Failed to attach \"%s\" to bridge \"%s\"",
+		netdev->priv.veth_attr.pair, netdev->link);
+	}
+
+
+	// netdev->link = netdev->priv.veth_attr.pair;
 
 	/* Note that we're retrieving the container's ifindex in the host's
 	 * network namespace because we need it to move the device from the
@@ -337,7 +379,7 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 	 */
 	netdev->ifindex = if_nametoindex(netdev->link);
 	if (!netdev->ifindex) {
-		ERROR("Failed to retrieve ifindex for \"%s\"", netdev->link);
+        	ERROR("Failed to retrieve ifindex for \"%s\" \"%d\"", netdev->link, netdev->ifindex);
 		return -1;
 	}
 
@@ -353,6 +395,11 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
 		if (err)
 			return -1;
 	}
+
+	// int l = strnlen(ifname, IFNAMSIZ);
+	// memset(netdev->link, 0, IFNAMSIZ);
+	// strncpy(netdev->link, netdev->priv.veth_attr.pair, IFNAMSIZ);
+	// memcpy(netdev->link, netdev->priv.veth_attr.pair, IFNAMSIZ);
 
 	return 0;
 }
@@ -425,8 +472,7 @@ static int shutdown_vlan(struct lxc_handler *handler, struct lxc_netdev *netdev)
 
 static int shutdown_phys(struct lxc_handler *handler, struct lxc_netdev *netdev)
 {
-	int err;
-
+        int err;
 	if (netdev->downscript) {
 		err = run_script(handler->name, "net", netdev->downscript,
 				 "down", "phys", netdev->link, (char*) NULL);
@@ -1045,6 +1091,133 @@ out:
 	nlmsg_free(nlmsg);
 	nlmsg_free(answer);
 	return err;
+}
+
+static int lxc_netdev_create_vrf(const char *vrf, const char *table_id)
+{
+	DEBUG("Creating vrf \"%s\"", vrf); 
+	int err;
+	struct ifinfomsg *ifi;
+	struct nl_handler nlh;
+	struct rtattr *nest1, *nest2;
+	struct nlmsg *answer = NULL, *nlmsg = NULL;
+
+	uint32_t table;
+	sscanf(table_id, "%u", &table);
+
+	err = netlink_open(&nlh, NETLINK_ROUTE);
+	if (err)
+		return err;
+
+	err = -ENOMEM;
+	nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
+	if (!nlmsg)
+		goto out;
+
+	answer = nlmsg_alloc_reserve(NLMSG_GOOD_SIZE);
+	if (!answer)
+		goto out;
+
+	nlmsg->nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK;
+	nlmsg->nlmsghdr->nlmsg_type = RTM_NEWLINK;
+
+	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
+	if (!ifi) {
+		err = -ENOMEM;
+		goto out;
+	}
+	ifi->ifi_family = AF_UNSPEC;
+	ifi->ifi_change |= IFF_UP;
+	ifi->ifi_flags |= IFF_UP;
+
+	nest1 = nla_begin_nested(nlmsg, IFLA_LINKINFO);
+	if (!nest1)
+		goto out;
+
+	if (nla_put_string(nlmsg, IFLA_INFO_KIND, "vrf"))
+		goto out;
+
+	nest2 = nla_begin_nested(nlmsg, IFLA_INFO_DATA);
+	if (!nest2)
+		goto out;
+	
+	if (nla_put_u32(nlmsg,IFLA_VRF_TABLE, table))
+		goto out;
+
+	nla_end_nested(nlmsg, nest2);
+	nla_end_nested(nlmsg, nest1);
+
+	if (nla_put_string(nlmsg, IFLA_IFNAME, vrf))
+		goto out;
+
+	err = netlink_transaction(&nlh, nlmsg, answer);
+out:
+	netlink_close(&nlh);
+	nlmsg_free(answer);
+	nlmsg_free(nlmsg);
+	return err;
+}
+
+int lxc_netdev_set_vrf(const char *name, const char *vrf, const char *table_id)
+{
+	lxc_netdev_create_vrf(vrf, table_id);
+	DEBUG("Setting vrf \"%s\" for interface \"%s\"", vrf, name); 
+	int err, index, vrfindex, len;
+	struct ifinfomsg *ifi;
+	struct nl_handler nlh;
+	struct nlmsg *answer = NULL, *nlmsg = NULL;
+
+	err = netlink_open(&nlh, NETLINK_ROUTE);
+	if (err)
+		return err;
+
+	err = -EINVAL;
+	len = strlen(name);
+	if (len == 1 || len >= IFNAMSIZ)
+		goto out;
+
+	err = -ENOMEM;
+	nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
+	if (!nlmsg)
+		goto out;
+
+	answer = nlmsg_alloc_reserve(NLMSG_GOOD_SIZE);
+	if (!answer)
+		goto out;
+
+	err = -EINVAL;
+	index = if_nametoindex(name);
+	if (!index)
+		goto out;
+	DEBUG("Interface \"%s\" ifindex:%d", name, index); 
+
+	err = -EINVAL;
+	vrfindex = if_nametoindex(vrf);
+	if (!vrfindex)
+		goto out;
+	DEBUG("VRF \"%s\" ifindex:%d", vrf, vrfindex); 
+
+	nlmsg->nlmsghdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	nlmsg->nlmsghdr->nlmsg_type = RTM_NEWLINK;
+
+	ifi = nlmsg_reserve(nlmsg, sizeof(struct ifinfomsg));
+	if (!ifi) {
+		err = -ENOMEM;
+		goto out;
+	}
+	ifi->ifi_family = AF_UNSPEC;
+	ifi->ifi_index = index;
+
+	if (nla_put_u32(nlmsg, IFLA_MASTER, vrfindex))
+		goto out;
+
+	err = netlink_transaction(&nlh, nlmsg, answer);
+out:
+	netlink_close(&nlh);
+	nlmsg_free(answer);
+	nlmsg_free(nlmsg);
+	return err;
+
 }
 
 int lxc_netdev_up(const char *name)
@@ -1777,6 +1950,60 @@ int lxc_ipv4_dest_add(int ifindex, struct in_addr *dest)
 	return ip_route_dest_add(AF_INET, ifindex, dest);
 }
 
+int lxc_ipv4_route_dest_add(int ifindex, struct in_addr *dest,
+			    struct in_addr *gateway, const int mask)
+{
+  int family = AF_INET;
+  int addrlen, err;
+  struct nl_handler nlh;
+  struct rtmsg *rt;
+  struct nlmsg *answer = NULL, *nlmsg = NULL;
+  
+  addrlen = family == AF_INET ? sizeof(struct in_addr)
+                              : sizeof(struct in6_addr);
+
+  err = netlink_open(&nlh, NETLINK_ROUTE);
+  if (err)
+    return err;
+  
+  err = -ENOMEM;
+  nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
+  if (!nlmsg)
+    goto out;
+  
+  answer = nlmsg_alloc_reserve(NLMSG_GOOD_SIZE);
+  if (!answer)
+    goto out;
+  
+  nlmsg->nlmsghdr->nlmsg_flags =
+    NLM_F_ACK | NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
+  
+  nlmsg->nlmsghdr->nlmsg_type = RTM_NEWROUTE;
+  
+  rt = nlmsg_reserve(nlmsg, sizeof(struct rtmsg));
+  if (!rt)
+    goto out;
+  rt->rtm_family = family;
+  rt->rtm_table = RT_TABLE_MAIN;
+  rt->rtm_scope =  RT_SCOPE_UNIVERSE; // RT_SCOPE_LINK;
+  rt->rtm_protocol = RTPROT_BOOT;
+  rt->rtm_type = RTN_UNICAST;
+  rt->rtm_dst_len = mask;
+  err = -EINVAL;
+  if (nla_put_buffer(nlmsg, RTA_DST, dest, addrlen))
+    goto out;
+  if (nla_put_buffer(nlmsg, RTA_GATEWAY, gateway, addrlen))
+    goto out;
+  if (nla_put_u32(nlmsg, RTA_OIF, ifindex))
+    goto out;
+  err = netlink_transaction(&nlh, nlmsg, answer);
+ out:
+  netlink_close(&nlh);
+  nlmsg_free(answer);
+  nlmsg_free(nlmsg);
+  return err;
+}
+
 int lxc_ipv6_dest_add(int ifindex, struct in6_addr *dest)
 {
 	return ip_route_dest_add(AF_INET6, ifindex, dest);
@@ -1803,19 +2030,80 @@ bool is_ovs_bridge(const char *bridge)
 struct ovs_veth_args {
 	const char *bridge;
 	const char *nic;
+	uint16_t vlan;
 };
 
 /* Called from a background thread - when nic goes away, remove it from the
  * bridge.
  */
-static int lxc_ovs_delete_port_exec(void *data)
-{
-	struct ovs_veth_args *args = data;
+/* static int lxc_ovs_delete_port_exec(void *data) { */
+/* 	struct ovs_veth_args *args = data; */
+/* 	execlp("ovs-vsctl", "ovs-vsctl", "del-port", args->bridge, args->nic, */
+/* 	       (char *)NULL); */
+/* 	return -1; */
+/* } */
 
-	execlp("ovs-vsctl", "ovs-vsctl", "del-port", args->bridge, args->nic,
+static int lxc_ovs_attach_bridge_exec_first(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-br", args->bridge,
 	       (char *)NULL);
 	return -1;
 }
+
+static int lxc_ovs_attach_bridge_exec_first_half(void *data) {
+	struct ovs_veth_args *args = data;
+	// ovs-vsctl set Bridge brlan rstp_enable=false
+	execlp("ovs-vsctl", "ovs-vsctl", "set", "Bridge", args->bridge, "rstp_enable=false",
+	       (char *)NULL);
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_first_half_half(void *data) {
+	struct ovs_veth_args *args = data;
+	// ovs-vsctl set Bridge brlan stp_enable=false
+	execlp("ovs-vsctl", "ovs-vsctl", "set", "Bridge", args->bridge, "stp_enable=false",
+	       (char *)NULL);
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_first_up(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ip", "ip", "link", "set", "up", "dev", args->bridge,
+	       (char *)NULL);
+	return -1;
+}
+
+
+static int lxc_ovs_attach_bridge_exec_second(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ovs-vsctl", "ovs-vsctl", "--if-exists", "del-port", args->bridge, args->nic,
+	       (char *)NULL);
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_third(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ovs-vsctl", "ovs-vsctl", "--may-exist", "add-port", args->bridge, args->nic, "--",
+	       "set", "interface", args->nic, "type=internal", (char *)NULL);
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_third_set_native_mode(void *data) {
+	struct ovs_veth_args *args = data;
+	char tag[10];
+	memset( tag, 0, sizeof( tag ) );
+	snprintf( tag, sizeof(tag), "tag=%d", args->vlan );
+	execlp("ovs-vsctl", "ovs-vsctl", "--if-exists", "set", "port", args->nic,
+		   "vlan_mode=access", tag, (char *)NULL );
+	return -1;
+}
+
+static int lxc_ovs_attach_bridge_exec_third_up(void *data) {
+	struct ovs_veth_args *args = data;
+	execlp("ip", "ip", "link", "set", "up", "dev", args->nic, (char *)NULL);
+	return -1;
+}
+
 
 int lxc_ovs_delete_port(const char *bridge, const char *nic)
 {
@@ -1825,10 +2113,22 @@ int lxc_ovs_delete_port(const char *bridge, const char *nic)
 
 	args.bridge = bridge;
 	args.nic = nic;
+
+	/* ret = run_command(cmd_output, sizeof(cmd_output), */
+	/* 		  lxc_ovs_delete_port_exec, (void *)&args); */
+
 	ret = run_command(cmd_output, sizeof(cmd_output),
-			  lxc_ovs_delete_port_exec, (void *)&args);
+			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
 	if (ret < 0) {
-		ERROR("Failed to delete \"%s\" from openvswitch bridge \"%s\": "
+		ERROR("Failed to delete \"%s\" from openvswitch first phase bridge \"%s\": "
+		      "%s", bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to delete \"%s\" from openvswitch second phase bridge \"%s\": "
 		      "%s", bridge, nic, cmd_output);
 		return -1;
 	}
@@ -1836,16 +2136,7 @@ int lxc_ovs_delete_port(const char *bridge, const char *nic)
 	return 0;
 }
 
-static int lxc_ovs_attach_bridge_exec(void *data)
-{
-	struct ovs_veth_args *args = data;
-
-	execlp("ovs-vsctl", "ovs-vsctl", "add-port", args->bridge, args->nic,
-	       (char *)NULL);
-	return -1;
-}
-
-static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
+static int lxc_ovs_attach_bridge(const char *bridge, const char *nic, const uint16_t vlan )
 {
 	int ret;
 	char cmd_output[MAXPATHLEN];
@@ -1853,10 +2144,71 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 
 	args.bridge = bridge;
 	args.nic = nic;
+	args.vlan = vlan;
 	ret = run_command(cmd_output, sizeof(cmd_output),
-			  lxc_ovs_attach_bridge_exec, (void *)&args);
+			  lxc_ovs_attach_bridge_exec_first, (void *)&args);
 	if (ret < 0) {
-		ERROR("Failed to attach \"%s\" to openvswitch bridge \"%s\": %s",
+		ERROR("Failed to attach \"%s\" to openvswitch first phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first_half, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch first_half phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first_half_half, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch first_half phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_first_up, (void *)&args);
+
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch first phase up bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_second, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch second phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_third, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch third phase bridge \"%s\": %s",
+		      bridge, nic, cmd_output);
+		return -1;
+	}
+
+	if( vlan != 0)
+	{
+		ret = run_command(cmd_output, sizeof(cmd_output),
+				lxc_ovs_attach_bridge_exec_third_set_native_mode, (void *)&args);
+		if (ret < 0) {
+			ERROR("Failed to attach \"%s\" to openvswitch third phase set native vlan bridge \"%s\": %s",
+				bridge, nic, cmd_output);
+			return -1;
+		}
+	}
+
+	ret = run_command(cmd_output, sizeof(cmd_output),
+			  lxc_ovs_attach_bridge_exec_third_up, (void *)&args);
+	if (ret < 0) {
+		ERROR("Failed to attach \"%s\" to openvswitch third phase up bridge \"%s\": %s",
 		      bridge, nic, cmd_output);
 		return -1;
 	}
@@ -1864,7 +2216,7 @@ static int lxc_ovs_attach_bridge(const char *bridge, const char *nic)
 	return 0;
 }
 
-int lxc_bridge_attach(const char *bridge, const char *ifname)
+int lxc_bridge_attach(const char *bridge, const char *ifname, const uint16_t vlan)
 {
 	int err, fd, index;
 	struct ifreq ifr;
@@ -1876,8 +2228,11 @@ int lxc_bridge_attach(const char *bridge, const char *ifname)
 	if (!index)
 		return -EINVAL;
 
-	if (is_ovs_bridge(bridge))
-		return lxc_ovs_attach_bridge(bridge, ifname);
+	if (true)
+	        return lxc_ovs_attach_bridge(bridge, ifname, vlan);
+
+	/* if (is_ovs_bridge(bridge)) */
+	/* 	return lxc_ovs_attach_bridge(bridge, ifname); */
 
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
@@ -2324,6 +2679,7 @@ bool lxc_delete_network_unpriv(struct lxc_handler *handler)
 			continue;
 
 		if (netdev->type == LXC_NET_PHYS) {
+						  
 			ret = lxc_netdev_rename_by_index(netdev->ifindex,
 							 netdev->link);
 			if (ret < 0)
@@ -2499,16 +2855,34 @@ bool lxc_delete_network_priv(struct lxc_handler *handler)
 			continue;
 
 		if (netdev->type == LXC_NET_PHYS) {
-			ret = lxc_netdev_rename_by_index(netdev->ifindex, netdev->link);
-			if (ret < 0)
-				WARN("Failed to rename interface with index %d "
-				     "from \"%s\" to its initial name \"%s\"",
-				     netdev->ifindex, netdev->name, netdev->link);
-			else
-				TRACE("Renamed interface with index %d from "
-				      "\"%s\" to its initial name \"%s\"",
-				      netdev->ifindex, netdev->name,
-				      netdev->link);
+				  
+		  int err;
+
+		  // brname = netdev->priv.veth_attr.pair;
+
+		  /* if (netdev->priv.veth_attr.pair[0] != '\0') { */
+		  /*   brname = netdev->priv.veth_attr.pair; */
+		  /* } else { */
+		  /*   brname = netdev->priv.veth_attr.veth1; */
+		  /* } */
+		  
+		  err = lxc_ovs_delete_port(netdev->priv.veth_attr.veth1, netdev->link);
+		  if (err) {
+		    ERROR("FAILED \"%s\" and \"%s\"", netdev->priv.veth_attr.veth1, netdev->link);
+
+		    return -1;
+		  }
+
+		        /* ret = lxc_netdev_rename_by_index(netdev->ifindex, netdev->link); */
+			/* if (ret < 0) */
+			/* 	WARN("Failed to rename interface with index %d " */
+			/* 	     "from \"%s\" to its initial name \"%s\"", */
+			/* 	     netdev->ifindex, netdev->name, netdev->link); */
+			/* else */
+			/* 	TRACE("Renamed interface with index %d from " */
+			/* 	      "\"%s\" to its initial name \"%s\"", */
+			/* 	      netdev->ifindex, netdev->name, */
+			/* 	      netdev->link); */
 			goto clear_ifindices;
 		}
 
@@ -2754,6 +3128,119 @@ static int setup_ipv6_addr(struct lxc_list *ip, int ifindex)
 	return 0;
 }
 
+
+const static int _parse_route (char * route, const int ifindex, const char * ifname) {
+
+  /* char * route = malloc(strlen(_route) + 1); */
+  /* memset(route, 0, strlen(_route) + 1); */
+  /* strcpy(route, _route); */
+
+  const char delim1[] = " ";
+  const char delim2[] = "/";
+  const char cdelim2  = '/';
+  char * snet = NULL;
+  char * sdst = NULL;
+  char * smask = NULL;
+  char * sgw = NULL;
+  int mask = 0;
+
+  char * part = strtok(route, delim1);
+  if (part != NULL) {
+    snet = part;
+    part = strtok(NULL, delim1);
+    if (part != NULL) {
+      sgw = part;
+    }
+  }
+
+  if (snet != NULL && sgw != NULL) {
+    if (strchr(snet, cdelim2) != NULL) {
+      char * p = strtok(snet, delim2);
+      if (p != NULL) {
+	sdst = p;
+	p = strtok(NULL, delim2);
+	if (p != NULL) {
+	  smask = p;
+	}
+      }
+    }
+
+    if (sdst != NULL &&  smask != NULL) {
+      mask = atoi(smask);
+
+      struct in_addr *dest;
+      struct in_addr *gw;
+
+      int err;
+
+      dest = malloc(sizeof(*dest));
+      memset(dest, 0, sizeof(*dest));
+      inet_pton(AF_INET, sdst, dest);
+
+      gw = malloc(sizeof(*gw));
+      memset(gw, 0, sizeof(*gw));
+      inet_pton(AF_INET, sgw, gw);
+
+      err = lxc_ipv4_route_dest_add(ifindex, dest, gw, mask);
+      if (err) {
+	ERROR("1-st ip r add are failed with "
+	      "device \"%s\": %s. Second adding route to gateway", ifname, strerror(-err));
+
+	err = lxc_ipv4_dest_add(ifindex, gw);
+	if (err) {
+	  ERROR("Failed to add ipv4 dest for network "
+		"device \"%s\": %s", ifname, strerror(-err));
+	}
+
+	err = lxc_ipv4_route_dest_add(ifindex, dest, gw, mask);
+	if (err) {
+	  ERROR("2-nd ip r add are failed "
+		"device \"%s\": %s", ifname, strerror(-err));
+	  // free(route);
+	  free(dest);
+	  free(gw);
+	  return -1;
+	}
+      }
+      // free(route);
+      free(dest);
+      free(gw);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+const static int _parse_routes(const char * _routes, const int ifindex, const char *ifname) {
+  char * routes = malloc(strlen(_routes) +1);
+  memset(routes, 0, strlen(_routes) + 1);
+  strcpy(routes, _routes);
+  int err;
+
+  char delim[] = "|";
+  char * route = strtok(routes, delim);
+  char * arrs[10];
+  int i = 0;
+  while (route != NULL) {
+    // printf("'%s'\n", route);
+    arrs[i] = malloc(strlen(route) + 1);
+    memset(arrs[i], 0, strlen(route) + 1);
+    strcpy(arrs[i], route);
+    route = strtok(NULL, delim);
+    i++;
+  }
+  for (int j=0; j < i; j++) {
+    err = _parse_route(arrs[j], ifindex, ifname);
+    free(arrs[j]);
+    if (err) {
+      free(routes);
+      return err;
+    }
+  }
+  free(routes);
+  return 0;
+}
+
 static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 {
 	char ifname[IFNAMSIZ];
@@ -2791,10 +3278,10 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 
 	/* get the new ifindex in case of physical netdev */
 	if (netdev->type == LXC_NET_PHYS) {
-		netdev->ifindex = if_nametoindex(netdev->link);
+	        netdev->ifindex = if_nametoindex(netdev->link); // netdev->priv.veth_attr.pair
 		if (!netdev->ifindex) {
 			ERROR("Failed to get ifindex for network device \"%s\"",
-			      netdev->link);
+			      netdev->link); // netdev->priv.veth_attr.pair
 			return -1;
 		}
 	}
@@ -2812,7 +3299,7 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 	 */
 	if (netdev->name[0] == '\0') {
 		if (netdev->type == LXC_NET_PHYS)
-			strcpy(netdev->name, netdev->link);
+		        strcpy(netdev->name, netdev->link); // netdev->link netdev->priv.veth_attr.pair
 		else
 			strcpy(netdev->name, "eth%d");
 	}
@@ -2823,6 +3310,16 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 		if (err) {
 			ERROR("Failed to rename network device \"%s\" to "
 			      "\"%s\": %s", ifname, netdev->name, strerror(-err));
+			return -1;
+		}
+	}
+
+	/* set vrf for interface */
+	if (netdev->vrf && netdev->table_id) {
+		err = lxc_netdev_set_vrf(ifname, netdev->vrf, netdev->table_id);
+		if (err) {
+			ERROR("Failed to set vrf \"%s\" tablie id %s to "
+			      "\"%s\": %s", netdev->vrf, netdev->table_id, ifname, strerror(-err));
 			return -1;
 		}
 	}
@@ -2963,6 +3460,27 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
 				}
 				return -1;
 			}
+		}
+	}
+
+	if (netdev->ipv4route) {
+	  	if (!(netdev->flags & IFF_UP)) {
+			ERROR("Cannot add ipv4 route for network device "
+			      "\"%s\" when not bringing up the interface", ifname);
+			return -1;
+		}
+		if (lxc_list_empty(&netdev->ipv4)) {
+			ERROR("Cannot add ipv4 route for network device "
+			      "\"%s\" when not assigning an address", ifname);
+			return -1;
+		}
+
+		printf("\n route is %s", netdev->ipv4route);
+		err = _parse_routes(netdev->ipv4route, netdev->ifindex, ifname);
+		if (err) {
+		  ERROR("_parse_routes ip r add are failed with "
+			"device \"%s\": %s. Second adding route to gateway", ifname, strerror(-err));
+		  return -1;
 		}
 	}
 

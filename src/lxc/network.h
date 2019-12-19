@@ -94,6 +94,7 @@ struct ifla_veth {
 	char pair[IFNAMSIZ];
 	char veth1[IFNAMSIZ];
 	int ifindex;
+	uint16_t vlan;
 };
 
 struct ifla_vlan {
@@ -154,6 +155,7 @@ union netdev_p {
  *                      configuration
  * @downscript        : a script filename to be executed during interface
  *                      destruction
+ * @ipv4route         : custom route
  */
 struct lxc_netdev {
 	ssize_t idx;
@@ -164,6 +166,8 @@ struct lxc_netdev {
 	char name[IFNAMSIZ];
 	char *hwaddr;
 	char *mtu;
+	char *vrf;
+	char *table_id;
 	union netdev_p priv;
 	struct lxc_list ipv4;
 	struct lxc_list ipv6;
@@ -171,7 +175,8 @@ struct lxc_netdev {
 	struct in_addr *ipv4_gateway;
 	bool ipv6_gateway_auto;
 	struct in6_addr *ipv6_gateway;
-	char *upscript;
+        char *ipv4route;
+        char *upscript;
 	char *downscript;
 };
 
@@ -200,6 +205,8 @@ extern int lxc_netdev_down(const char *name);
 
 /* Change the mtu size for the specified device. */
 extern int lxc_netdev_set_mtu(const char *name, int mtu);
+
+extern int lxc_netdev_set_vrf(const char *name, const char *vrf, const char *table_id);
 
 /* Create a virtual network devices. */
 extern int lxc_veth_create(const char *name1, const char *name2);
@@ -234,7 +241,7 @@ extern int lxc_ipv4_gateway_add(int ifindex, struct in_addr *gw);
 extern int lxc_ipv6_gateway_add(int ifindex, struct in6_addr *gw);
 
 /* Attach an interface to the bridge. */
-extern int lxc_bridge_attach(const char *bridge, const char *ifname);
+extern int lxc_bridge_attach(const char *bridge, const char *ifname, const uint16_t vlan);
 extern int lxc_ovs_delete_port(const char *bridge, const char *nic);
 
 extern bool is_ovs_bridge(const char *bridge);

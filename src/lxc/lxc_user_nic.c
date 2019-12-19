@@ -525,7 +525,7 @@ static int create_nic(char *nic, char *br, int pid, char **cnic)
 		}
 
 		/* attach veth1 to bridge */
-		ret = lxc_bridge_attach(br, veth1buf);
+		ret = lxc_bridge_attach(br, veth1buf, 0);
 		if (ret < 0) {
 			usernic_error("Error attaching %s to %s\n", veth1buf, br);
 			goto out_del;
